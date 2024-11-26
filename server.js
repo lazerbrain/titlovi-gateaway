@@ -13,41 +13,72 @@ app.use(express.json());
 const cache = new Map();
 const CACHE_DURATION = 60 * 60 * 1000; // 1 sat
 
-// Rotacija User-Agent headera
+// Proširena lista User-Agent headera
 const userAgents = [
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
 ];
 
 const getRandomUserAgent = () =>
 	userAgents[Math.floor(Math.random() * userAgents.length)];
 
-const axiosInstance = axios.create({
-	httpsAgent: new https.Agent({
-		rejectUnauthorized: false,
-	}),
-	timeout: 10000, // Povećan timeout na 10 sekundi
-	headers: {
-		Accept:
-			"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.9,hr;q=0.8,sr;q=0.7",
-		"Accept-Encoding": "gzip, deflate, br",
-		Connection: "keep-alive",
-		"Cache-Control": "no-cache",
-		Pragma: "no-cache",
-		"Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120"',
-		"Sec-Ch-Ua-Mobile": "?0",
-		"Sec-Ch-Ua-Platform": '"Windows"',
-		"Sec-Fetch-Dest": "document",
-		"Sec-Fetch-Mode": "navigate",
-		"Sec-Fetch-Site": "none",
-		"Sec-Fetch-User": "?1",
-		"Upgrade-Insecure-Requests": "1",
-		"User-Agent": getRandomUserAgent(),
-	},
-});
+// Funkcija za delay između requestova
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Funkcija za kreiranje random IP adrese
+const getRandomIP = () => {
+	return `${Math.floor(Math.random() * 255)}.${Math.floor(
+		Math.random() * 255
+	)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+};
+
+// Konfiguracija axiosa sa retry mehanizmom
+const createAxiosInstance = () => {
+	return axios.create({
+		httpsAgent: new https.Agent({
+			rejectUnauthorized: false,
+		}),
+		timeout: 15000,
+		headers: {
+			Accept:
+				"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+			"Accept-Language": "en-US,en;q=0.9,hr;q=0.8,sr;q=0.7",
+			"Accept-Encoding": "gzip, deflate, br",
+			Connection: "keep-alive",
+			"Cache-Control": "no-cache",
+			Pragma: "no-cache",
+			"Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120"',
+			"Sec-Ch-Ua-Mobile": "?0",
+			"Sec-Ch-Ua-Platform": '"Windows"',
+			"Sec-Fetch-Dest": "document",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Site": "none",
+			"Sec-Fetch-User": "?1",
+			"Upgrade-Insecure-Requests": "1",
+			"User-Agent": getRandomUserAgent(),
+			"X-Forwarded-For": getRandomIP(),
+			"X-Real-IP": getRandomIP(),
+		},
+	});
+};
+
+// Funkcija za retry mehanizam
+const fetchWithRetry = async (url, options = {}, retries = 3) => {
+	for (let i = 0; i < retries; i++) {
+		try {
+			const axiosInstance = createAxiosInstance();
+			const response = await axiosInstance.get(url, options);
+			return response;
+		} catch (error) {
+			if (i === retries - 1) throw error;
+			const delayTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
+			await delay(delayTime);
+		}
+	}
+};
 
 app.get("/search/:token/:imdbId/:type/:langs", async (req, res) => {
 	try {
@@ -64,7 +95,7 @@ app.get("/search/:token/:imdbId/:type/:langs", async (req, res) => {
 		console.log(`Searching for: ${imdbId} (${type})`);
 
 		// OMDB API call
-		const imdbResponse = await axiosInstance.get(
+		const imdbResponse = await fetchWithRetry(
 			`https://www.omdbapi.com/?i=${imdbId}&apikey=${process.env.OMDB_API_KEY}`
 		);
 		const searchTitle = imdbResponse.data.Title;
@@ -73,19 +104,23 @@ app.get("/search/:token/:imdbId/:type/:langs", async (req, res) => {
 			return res.json([]);
 		}
 
+		// Dodajemo random delay između requestova
+		await delay(1000 + Math.random() * 2000);
+
 		const searchUrl = `https://titlovi.com/titlovi/?prijevod=${encodeURIComponent(
 			searchTitle
 		)}&sort=4`;
 		console.log("Searching:", searchUrl);
 
-		// New request with fresh headers
-		const response = await axiosInstance.get(searchUrl, {
+		const response = await fetchWithRetry(searchUrl, {
 			headers: {
-				...axiosInstance.defaults.headers,
-				"User-Agent": getRandomUserAgent(),
 				Referer: "https://titlovi.com/",
-				Cookie: "ASP.NET_SessionId=abc123; _ga=GA1.2.123.123",
 				Host: "titlovi.com",
+				Cookie: `ASP.NET_SessionId=${Math.random()
+					.toString(36)
+					.substring(7)}; _ga=GA1.2.${Math.random()
+					.toString()
+					.substring(2)}.${Date.now()}`,
 			},
 		});
 
