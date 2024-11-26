@@ -3,6 +3,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const cors = require("cors");
 const https = require("https");
+const { HttpsProxyAgent } = require("https-proxy-agent");
 require("dotenv").config();
 
 const app = express();
@@ -22,6 +23,24 @@ const userAgents = [
 	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
 ];
 
+const getRandomProxy = async () => {
+	try {
+		// Koristimo besplatni API za proxy liste
+		const response = await axios.get(
+			"https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps&filterUpTime=90&speed=fast&anonymityLevel=elite"
+		);
+		const proxies = response.data.data;
+		if (proxies && proxies.length > 0) {
+			const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+			return `http://${proxy.ip}:${proxy.port}`;
+		}
+		return null;
+	} catch (error) {
+		console.error("Error fetching proxy:", error);
+		return null;
+	}
+};
+
 const getRandomUserAgent = () =>
 	userAgents[Math.floor(Math.random() * userAgents.length)];
 
@@ -36,11 +55,14 @@ const getRandomIP = () => {
 };
 
 // Konfiguracija axiosa sa retry mehanizmom
-const createAxiosInstance = () => {
-	return axios.create({
-		httpsAgent: new https.Agent({
-			rejectUnauthorized: false,
-		}),
+const createAxiosInstance = async () => {
+	const proxy = await getRandomProxy();
+	const config = {
+		httpsAgent: proxy
+			? new HttpsProxyAgent(proxy)
+			: new https.Agent({
+					rejectUnauthorized: false,
+			  }),
 		timeout: 15000,
 		headers: {
 			Accept:
@@ -59,27 +81,27 @@ const createAxiosInstance = () => {
 			"Sec-Fetch-User": "?1",
 			"Upgrade-Insecure-Requests": "1",
 			"User-Agent": getRandomUserAgent(),
-			"X-Forwarded-For": getRandomIP(),
-			"X-Real-IP": getRandomIP(),
 		},
-	});
+	};
+
+	return axios.create(config);
 };
 
 // Funkcija za retry mehanizam
 const fetchWithRetry = async (url, options = {}, retries = 3) => {
 	for (let i = 0; i < retries; i++) {
 		try {
-			const axiosInstance = createAxiosInstance();
+			const axiosInstance = await createAxiosInstance();
 			const response = await axiosInstance.get(url, options);
 			return response;
 		} catch (error) {
+			console.error(`Attempt ${i + 1} failed:`, error.message);
 			if (i === retries - 1) throw error;
 			const delayTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
 			await delay(delayTime);
 		}
 	}
 };
-
 app.get("/search/:token/:imdbId/:type/:langs", async (req, res) => {
 	try {
 		const { imdbId, type, langs } = req.params;
